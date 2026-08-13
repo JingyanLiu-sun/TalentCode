@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -41,8 +42,21 @@ Ordered list of what still needs to be done to complete the original goal.
 Any values the next LLM needs verbatim: IDs, tokens, exact error messages, config values \
 discovered during the run.
 
-Be concise. Omit reasoning steps and intermediate attempts. Keep conclusions.\
+Be concise. Omit reasoning steps and intermediate attempts. Keep conclusions.
+
+Special handling:
+- Blocks marked [ERROR-VERBATIM] contain exact error output: copy them word-for-word \
+into section 6, never paraphrase.
+- Previously read code files are replaced by index stubs; note in section 4 that the \
+file was read and can be re-fetched with read_file (mode=structure or mode=range).\
 """
+
+# 预处理阈值：tool_result 超过该长度即截断，错误结果豁免
+_TOOL_RESULT_LIMIT = 8192
+_HEAD_KEEP = 2048
+_TAIL_KEEP = 2048
+# read_file 结果中被视为代码文件的扩展名：压缩时只保留索引 stub
+_CODE_EXTS = frozenset({".py", ".pyi", ".ipynb"})
 
 
 # 返回当前 UTC 时间的简短时间戳字符串（用于文件名）
@@ -114,7 +128,7 @@ class Compactor:
             len(str(m.get("content", ""))) for m in messages
         ) // 4  # 粗略 token 估算（字符数 / 4）
 
-        history_text = _messages_to_text(messages)
+        history_text = _messages_to_text(_preprocess_for_summary(messages))
         prompt = _COMPACT_PROMPT
         if focus.strip():
             prompt += f"\n\nIMPORTANT: Pay special attention to: {focus.strip()}"
@@ -158,6 +172,70 @@ class Compactor:
             path.write_text(text, encoding="utf-8")
         except Exception:
             logger.exception("compactor: failed to write summary file")
+
+
+# 确定性预处理：在送入 LLM 摘要前降低历史体积，零 LLM 成本。
+# 规则：① 错误结果原样保留并加 [ERROR-VERBATIM] 标记；② read_file 读过的代码文件
+# 替换为索引 stub（需要时可用 read_file mode=structure/range 低成本重取）；
+# ③ 其余超长 tool_result 保留头尾、截断中间。返回深拷贝，不修改原消息。
+def _preprocess_for_summary(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    processed = copy.deepcopy(messages)
+
+    # 建立 tool_use_id → (name, input) 映射，供 tool_result 回查来源工具
+    tool_uses: dict[str, tuple[str, dict[str, Any]]] = {}
+    for msg in processed:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if block.get("type") == "tool_use":
+                    tool_uses[block.get("id", "")] = (
+                        str(block.get("name", "")),
+                        block.get("input") if isinstance(block.get("input"), dict) else {},
+                    )
+
+    for msg in processed:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if block.get("type") != "tool_result":
+                continue
+            result_content = block.get("content", "")
+            if not isinstance(result_content, str):
+                result_content = str(result_content)
+                block["content"] = result_content
+
+            # ① 错误结果：原样保留，摘要 prompt 会要求逐字抄入 Critical Data
+            if block.get("is_error"):
+                if not result_content.startswith("[ERROR-VERBATIM]"):
+                    block["content"] = f"[ERROR-VERBATIM]\n{result_content}"
+                continue
+
+            tool_name, tool_input = tool_uses.get(
+                block.get("tool_use_id", ""), ("", {})
+            )
+
+            # ② read_file 读过的代码文件：只留索引 stub
+            file_path = str(tool_input.get("path", "")) if tool_name == "read_file" else ""
+            if file_path and Path(file_path).suffix in _CODE_EXTS:
+                lines = result_content.count("\n") + 1
+                block["content"] = (
+                    f"[File previously read: {file_path} ({lines} lines). "
+                    f"Content omitted to save context — use read_file with "
+                    f"mode=structure or mode=range to re-fetch what you need.]"
+                )
+                continue
+
+            # ③ 其余超长结果：保留头尾，截断中间
+            if len(result_content) > _TOOL_RESULT_LIMIT:
+                omitted = len(result_content) - _HEAD_KEEP - _TAIL_KEEP
+                block["content"] = (
+                    result_content[:_HEAD_KEEP]
+                    + f"\n\n[... {omitted} chars omitted ...]\n\n"
+                    + result_content[-_TAIL_KEEP:]
+                )
+
+    return processed
 
 
 # 将消息列表序列化为可供 LLM 阅读的纯文本
