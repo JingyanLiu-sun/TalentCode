@@ -621,15 +621,25 @@ class KamaTuiApp(App[None]):
             if self._client is not None and self._session_id is not None and not self._busy:
                 self.run_worker(self._do_compact(), name="compact", exclusive=False)
             return
-        if self._client is None or self._session_id is None or self._busy:
-            self._append(Static("[yellow]agent busy or disconnected[/yellow]", classes="log-line"))
+        if self._client is None or self._session_id is None:
+            self._append(Static("[yellow]disconnected[/yellow]", classes="log-line"))
+            return
+        if self._busy:
+            # agent 运行中：消息交给 daemon 排队，待当前 run 结束后自动执行
+            event.text_area.text = ""
+            self._append(Static(f"[bold]>[/bold] {content}", classes="user-turn"))
+            self._append(Static(
+                "[dim]queued — will run after the current task finishes[/dim]",
+                classes="log-line",
+            ))
+            self.run_worker(self._do_send_message(content), name="send_message", exclusive=False)
             return
         self._busy = True
         prompt = event.text_area
         prompt.text = ""
-        prompt.disabled = True
+        prompt.disabled = False
         prompt.read_only = False
-        prompt.border_title = "agent is working..."
+        prompt.border_title = "agent is working — enter to queue a message"
         self._append(Static(f"[bold]>[/bold] {content}", classes="user-turn"))
         self._update_header("running")
         self.run_worker(self._do_send_message(content), name="send_message", exclusive=False)

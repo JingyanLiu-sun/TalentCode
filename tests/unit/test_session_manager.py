@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -104,3 +105,70 @@ async def test_closed_session_rejects_message(tmp_path: Path) -> None:
     with pytest.raises(HandlerError) as exc:
         await manager.send_message(session.id, "again")
     assert exc.value.code == SESSION_CLOSED
+
+
+# 功能：验证 session 忙时新消息不再报 session_busy，而是持久化入队并在当前 run 后顺序执行
+# 设计：首个 run 用 Event 阻塞占住锁，期间发送第二条消息；断言排队消息立即落盘并发布
+#       session.message_queued 事件，释放后两个 run 按序完成、状态回到 waiting_for_input
+async def test_send_message_while_busy_queues_and_runs_in_order(tmp_path: Path) -> None:
+    events: list[object] = []
+    bus = EventBus()
+
+    async def collect(event: object) -> None:
+        events.append(event)
+
+    bus.subscribe(collect)
+
+    release = asyncio.Event()
+    calls: list[str] = []
+
+    class _BlockingRunner:
+        first_call = True
+
+        async def run_and_capture(
+            self,
+            goal: str,
+            *,
+            run_id: str | None = None,
+            session: Session | None = None,
+            store: SessionStore | None = None,
+            system_prompt_override: str | None = None,
+            tool_whitelist: list[str] | None = None,
+        ) -> RunOutcome:
+            assert run_id is not None and session is not None and store is not None
+            calls.append(goal)
+            if _BlockingRunner.first_call:
+                _BlockingRunner.first_call = False
+                await release.wait()
+            store.append_messages(
+                session.id,
+                [{"role": "assistant", "content": [{"type": "text", "text": f"done {goal}"}]}],
+                run_id,
+            )
+            return RunOutcome(status="success", result="done", reason=None)
+
+    store = SessionStore(tmp_path)
+    manager = SessionManager(store, _BlockingRunner, bus)  # type: ignore[arg-type]
+    session = await manager.create("chat")
+
+    first_task = asyncio.create_task(manager.send_message(session.id, "first"))
+    await asyncio.sleep(0.01)  # 等首个 run 拿锁
+
+    queued_task = asyncio.create_task(manager.send_message(session.id, "second"))
+    await asyncio.sleep(0.01)
+
+    # 排队消息不报错、不阻塞，且立即持久化并发布引导事件
+    assert not queued_task.done()
+    messages = store.read_messages(session.id)
+    assert [m["content"] for m in messages if m["role"] == "user"] == ["first", "second"]
+    types = [e.type for e in events]  # type: ignore[attr-defined]
+    assert "session.message_queued" in types
+
+    release.set()
+    run1 = await asyncio.wait_for(first_task, timeout=5.0)
+    run2 = await asyncio.wait_for(queued_task, timeout=5.0)
+
+    assert calls == ["first", "second"]
+    loaded = store.read_meta(session.id)
+    assert loaded.status == "waiting_for_input"
+    assert loaded.run_ids == [run1, run2]

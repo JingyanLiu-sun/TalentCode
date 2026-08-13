@@ -122,6 +122,14 @@ class SessionMessageReceivedEvent(BaseModel):
     ts: str
 
 
+class SessionMessageQueuedEvent(BaseModel):
+    type: Literal["session.message_queued"] = "session.message_queued"
+    session_id: str
+    run_id: str  # 排队消息对应的 run_id，待当前 run 结束后自动执行
+    position: int  # 当前队列中的位置（1 起）
+    ts: str
+
+
 class SessionWaitingForInputEvent(BaseModel):
     type: Literal["session.waiting_for_input"] = "session.waiting_for_input"
     session_id: str
@@ -219,6 +227,7 @@ Event = Annotated[
     | LogLineEvent
     | SessionCreatedEvent
     | SessionMessageReceivedEvent
+    | SessionMessageQueuedEvent
     | SessionWaitingForInputEvent
     | SessionResumedEvent
     | SessionClosedEvent
