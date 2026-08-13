@@ -69,3 +69,95 @@ async def test_empty_file_returns_empty_content(tmp_path: Path) -> None:
     result = await ReadFileTool().invoke({"path": str(f)})
     assert not result.is_error
     assert result.content == ""
+
+
+# ---- mode=structure（AST 结构提取） ----
+
+# 功能：验证 structure 模式能提取 Python 文件的顶层类/函数签名及行号
+# 设计：写一个含类、方法、顶层函数、装饰器的样例文件，断言签名和行号均出现在输出中，且不含函数体实现
+async def test_structure_mode_extracts_signatures(tmp_path: Path) -> None:
+    f = tmp_path / "sample.py"
+    f.write_text(
+        "import os\n"
+        "\n"
+        "\n"
+        "class Foo:\n"
+        "    def bar(self, x: int) -> str:\n"
+        "        return str(x)\n"
+        "\n"
+        "    @staticmethod\n"
+        "    def baz():\n"
+        "        pass\n"
+        "\n"
+        "\n"
+        "async def top(a, b=1):\n"
+        "    return a + b\n",
+        encoding="utf-8",
+    )
+    result = await ReadFileTool().invoke({"path": str(f), "mode": "structure"})
+    assert not result.is_error
+    assert "class Foo" in result.content
+    assert "def bar(self, x: int) -> str" in result.content
+    assert "@staticmethod def baz()" in result.content
+    assert "async def top(a, b=1)" in result.content
+    # 实现细节不应出现在结构输出中
+    assert "return str(x)" not in result.content
+
+
+# 功能：验证 structure 模式对非 Python 文件返回 schema_error 并提示改用 full 模式
+# 设计：error_type 用 schema_error（不可重试），确认确定性失败不会触发 invoke_tool 的指数退避重试
+async def test_structure_mode_rejects_non_python(tmp_path: Path) -> None:
+    f = tmp_path / "data.txt"
+    f.write_text("plain text", encoding="utf-8")
+    result = await ReadFileTool().invoke({"path": str(f), "mode": "structure"})
+    assert result.is_error
+    assert result.error_type == "schema_error"
+    assert "mode=full" in result.content
+
+
+# 功能：验证 structure 模式对语法错误的 Python 文件返回 schema_error 而非抛出异常
+# 设计：破损源码确认 ast.parse 异常被捕获并转为可操作的错误提示
+async def test_structure_mode_syntax_error(tmp_path: Path) -> None:
+    f = tmp_path / "broken.py"
+    f.write_text("def broken(:\n", encoding="utf-8")
+    result = await ReadFileTool().invoke({"path": str(f), "mode": "structure"})
+    assert result.is_error
+    assert result.error_type == "schema_error"
+    assert "AST parse failed" in result.content
+
+
+# ---- mode=range（行范围读取） ----
+
+# 功能：验证 range 模式返回指定行范围并带行号前缀（1-based，两端包含）
+# 设计：读 5 行文件的第 2-4 行，断言行号与内容，确认 off-by-one 边界正确
+async def test_range_mode_returns_numbered_lines(tmp_path: Path) -> None:
+    f = tmp_path / "lines.txt"
+    f.write_text("a\nb\nc\nd\ne\n", encoding="utf-8")
+    result = await ReadFileTool().invoke(
+        {"path": str(f), "mode": "range", "start_line": 2, "end_line": 4}
+    )
+    assert not result.is_error
+    assert result.content == "2→b\n3→c\n4→d"
+
+
+# 功能：验证 range 模式省略 start/end 时默认读取全文范围
+# 设计：只传 start_line 时 end 取末行，确认缺省值逻辑不越界
+async def test_range_mode_defaults(tmp_path: Path) -> None:
+    f = tmp_path / "lines.txt"
+    f.write_text("a\nb\nc\n", encoding="utf-8")
+    result = await ReadFileTool().invoke({"path": str(f), "mode": "range", "start_line": 2})
+    assert not result.is_error
+    assert result.content == "2→b\n3→c"
+
+
+# 功能：验证 range 模式的非法范围（start > end 或 start 越界）返回 schema_error
+# 设计：确定性参数错误不抛异常，返回带文件总行数提示的错误信息供 LLM 修正
+async def test_range_mode_invalid_range(tmp_path: Path) -> None:
+    f = tmp_path / "lines.txt"
+    f.write_text("a\nb\n", encoding="utf-8")
+    result = await ReadFileTool().invoke(
+        {"path": str(f), "mode": "range", "start_line": 5, "end_line": 3}
+    )
+    assert result.is_error
+    assert result.error_type == "schema_error"
+    assert "invalid range" in result.content
