@@ -57,6 +57,8 @@ _HEAD_KEEP = 2048
 _TAIL_KEEP = 2048
 # read_file 结果中被视为代码文件的扩展名：压缩时只保留索引 stub
 _CODE_EXTS = frozenset({".py", ".pyi", ".ipynb"})
+# compact 后保留最近 N 轮完整对话（一轮 = 真实 user 消息及其后续 assistant/tool_result）
+TAIL_ROUNDS = 3
 
 
 # 返回当前 UTC 时间的简短时间戳字符串（用于文件名）
@@ -74,6 +76,7 @@ class CompactionResult:
     summary_text: str
     original_token_estimate: int
     summary_tokens: int
+    tail_messages: list[dict[str, Any]] | None = None
 
 
 class Compactor:
@@ -83,7 +86,7 @@ class Compactor:
         self._session_dir = session_dir
         self._session_id = session_id
 
-    # 压缩 ExecutionContext.messages，就地替换消息列表并写 summary 文件
+    # 压缩 ExecutionContext.messages，就地替换为 [摘要2条] + [最近N轮完整消息]
     async def compact(
         self,
         context: ExecutionContext,
@@ -94,10 +97,12 @@ class Compactor:
         if result is None:
             return None
 
-        context.messages = [
+        summary_part = [
             {"role": "user", "content": result.summary_text},
             {"role": "assistant", "content": "Understood, I'll continue from this summary."},
         ]
+        tail_part = result.tail_messages or []
+        context.messages = summary_part + tail_part
         self._write_summary(result.summary_text)
         await self._bus.publish(
             ContextCompactedEvent(
@@ -115,7 +120,7 @@ class Compactor:
         )
         return result
 
-    # 纯函数式压缩：接收消息列表，返回 CompactionResult；失败时返回 None
+    # 纯函数式压缩：只对历史部分做摘要，最近 N 轮原样保留；失败时返回 None
     async def compact_messages(
         self,
         messages: list[dict[str, Any]],
@@ -124,11 +129,19 @@ class Compactor:
     ) -> CompactionResult | None:
         from kama_claude.core.events.bus import EventBus as _Bus
 
+        split_idx = _find_tail_boundary(messages, tail_rounds=TAIL_ROUNDS)
+        history = messages[:split_idx]
+        tail = messages[split_idx:]
+
+        # 历史部分不足以压缩时直接跳过
+        if not history:
+            return None
+
         original_estimate = sum(
             len(str(m.get("content", ""))) for m in messages
         ) // 4  # 粗略 token 估算（字符数 / 4）
 
-        history_text = _messages_to_text(_preprocess_for_summary(messages))
+        history_text = _messages_to_text(_preprocess_for_summary(history))
         prompt = _COMPACT_PROMPT
         if focus.strip():
             prompt += f"\n\nIMPORTANT: Pay special attention to: {focus.strip()}"
@@ -162,6 +175,7 @@ class Compactor:
             summary_text=summary_text,
             original_token_estimate=original_estimate,
             summary_tokens=summary_tokens,
+            tail_messages=tail,
         )
 
     # 将摘要文本写入 session 目录的 summary_<ts>.md
@@ -172,6 +186,27 @@ class Compactor:
             path.write_text(text, encoding="utf-8")
         except Exception:
             logger.exception("compactor: failed to write summary file")
+
+
+# 从尾部向前找 N 轮真实用户消息的起始位置，作为 history/tail 切分点。
+# 真实用户轮次 = role 为 user 且 content 不是纯 tool_result 列表的消息。
+# 轮数不足时返回 0（表示无可压缩历史）。
+def _find_tail_boundary(messages: list[dict[str, Any]], tail_rounds: int) -> int:
+    user_indices: list[int] = []
+    for i, m in enumerate(messages):
+        if m.get("role") != "user":
+            continue
+        content = m.get("content")
+        # 纯 tool_result 消息不算真实用户轮次
+        if isinstance(content, list) and all(
+            b.get("type") == "tool_result" for b in content if isinstance(b, dict)
+        ):
+            continue
+        user_indices.append(i)
+
+    if len(user_indices) <= tail_rounds:
+        return 0
+    return user_indices[-tail_rounds]
 
 
 # 确定性预处理：在送入 LLM 摘要前降低历史体积，零 LLM 成本。

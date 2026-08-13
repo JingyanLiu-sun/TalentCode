@@ -8,7 +8,9 @@ from kama_claude.core.compact.compactor import (
     _HEAD_KEEP,
     _TAIL_KEEP,
     _TOOL_RESULT_LIMIT,
+    TAIL_ROUNDS,
     Compactor,
+    _find_tail_boundary,
     _preprocess_for_summary,
 )
 from kama_claude.core.context import ExecutionContext
@@ -64,20 +66,25 @@ async def test_compact_messages_returns_summary(tmp_path: Path) -> None:
     assert result.summary_text == expected
 
 
-# 功能：验证 compact() 将 context.messages 替换为两条摘要消息对
-# 设计：调用 compact() 后断言 messages 长度为 2，role 分别为 user/assistant
+# 功能：验证 compact() 将 context.messages 替换为 [摘要2条] + [最近N轮完整消息]
+# 设计：调用 compact() 后断言前 2 条为摘要对，后续为原始 tail 消息
 async def test_compact_replaces_context_messages(tmp_path: Path) -> None:
     provider = _stub_provider()
     bus = EventBus()
     compactor = Compactor(bus, tmp_path, "sess-1")
     ctx = ExecutionContext(run_id="r1", goal="test", max_steps=5)
-    ctx.messages = _make_messages()
+    messages = _make_messages(5)  # 5 轮，TAIL_ROUNDS=3 → tail = 最后 3 轮 = 6 条
+    ctx.messages = list(messages)
 
     await compactor.compact(ctx, provider)
 
-    assert len(ctx.messages) == 2
+    # 前 2 条是摘要对
     assert ctx.messages[0]["role"] == "user"
     assert ctx.messages[1]["role"] == "assistant"
+    # 后续是保留的 tail（最后 3 轮 = 6 条消息）
+    expected_tail = messages[4:]  # split_idx=4
+    assert ctx.messages[2:] == expected_tail
+    assert len(ctx.messages) == 2 + len(expected_tail)
 
 
 # 功能：验证 compact() 在 session 目录写入 summary_*.md 文件
@@ -246,12 +253,90 @@ async def test_compact_messages_sends_preprocessed_history(tmp_path: Path) -> No
     bus = EventBus()
     compactor = Compactor(bus, tmp_path, "sess-1")
     big = "h" * _HEAD_KEEP + "MIDDLE-SECRET" * 3000 + "t" * _TAIL_KEEP
-    messages = _tool_pair_messages(big)
+    # 构造足够多轮以便有 history 部分（需要 > TAIL_ROUNDS 轮）
+    messages = _make_messages(TAIL_ROUNDS + 1)  # 4 轮
+    # 在第一轮 assistant 消息中嵌入大 tool_result
+    messages[0] = {"role": "user", "content": "start"}
+    messages[1] = {"role": "assistant", "content": [
+        {"type": "tool_use", "id": "tu-1", "name": "bash", "input": {"command": "ls"}},
+    ]}
+    # 插入 tool_result 作为第二条消息后的 user 消息
+    messages.insert(2, {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "tu-1", "content": big},
+    ]})
 
     await compactor.compact_messages(messages, provider)
 
     sent = provider.chat.call_args.kwargs["messages"][0]["content"]
     assert "MIDDLE-SECRET" not in sent  # 中间段被预处理截断，未进入 LLM 输入
     assert "chars omitted" in sent
-    # 原始消息保持不变，token 估算仍基于真实历史体积
-    assert messages[1]["content"][0]["content"] == big
+
+
+# 功能：验证 _find_tail_boundary 正确切分历史与 tail
+# 设计：构造 5 轮纯文本消息，断言切分点位于倒数第 3 轮 user 消息处
+def test_find_tail_boundary_basic() -> None:
+    messages = _make_messages(5)  # user_indices = [0,2,4,6,8]
+    idx = _find_tail_boundary(messages, tail_rounds=3)
+    assert idx == 4  # user_indices[-3] = 4
+
+
+# 功能：验证轮数不足时返回 0（无可压缩历史）
+# 设计：构造仅 2 轮消息，断言返回 0
+def test_find_tail_boundary_insufficient_rounds() -> None:
+    messages = _make_messages(2)
+    idx = _find_tail_boundary(messages, tail_rounds=3)
+    assert idx == 0
+
+
+# 功能：验证 tool_result 类 user 消息不计入轮次
+# 设计：构造含 tool_result 的消息序列，断言切分点跳过 tool_result 消息
+def test_find_tail_boundary_skips_tool_results() -> None:
+    messages = [
+        {"role": "user", "content": "round 1"},          # idx=0, real user
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": "bash", "input": {}},
+        ]},
+        {"role": "user", "content": [                    # idx=2, tool_result → 跳过
+            {"type": "tool_result", "tool_use_id": "t1", "content": "ok"},
+        ]},
+        {"role": "assistant", "content": "done"},
+        {"role": "user", "content": "round 2"},          # idx=4, real user
+        {"role": "assistant", "content": "reply 2"},
+        {"role": "user", "content": "round 3"},          # idx=6, real user
+        {"role": "assistant", "content": "reply 3"},
+        {"role": "user", "content": "round 4"},          # idx=8, real user
+        {"role": "assistant", "content": "reply 4"},
+    ]
+    # real user_indices = [0, 4, 6, 8], tail_rounds=3 → idx = user_indices[-3] = 4
+    idx = _find_tail_boundary(messages, tail_rounds=3)
+    assert idx == 4
+
+
+# 功能：验证轮数不足时 compact_messages 返回 None
+# 设计：构造仅 2 轮消息，断言 compact_messages 返回 None
+async def test_compact_messages_skips_when_insufficient_rounds(tmp_path: Path) -> None:
+    provider = _stub_provider()
+    bus = EventBus()
+    compactor = Compactor(bus, tmp_path, "sess-1")
+    messages = _make_messages(2)  # 只有 2 轮，不足以切分
+
+    result = await compactor.compact_messages(messages, provider)
+
+    assert result is None
+    provider.chat.assert_not_called()
+
+
+# 功能：验证 compact 后 tail 消息内容完整保留（未被修改）
+# 设计：对比 compact 前后 tail 部分消息是否逐字一致
+async def test_compact_preserves_tail_messages_intact(tmp_path: Path) -> None:
+    provider = _stub_provider()
+    bus = EventBus()
+    compactor = Compactor(bus, tmp_path, "sess-1")
+    ctx = ExecutionContext(run_id="r1", goal="test", max_steps=5)
+    messages = _make_messages(5)
+    ctx.messages = list(messages)
+    expected_tail = messages[4:]  # 最后 3 轮
+
+    await compactor.compact(ctx, provider)
+
+    assert ctx.messages[2:] == expected_tail
