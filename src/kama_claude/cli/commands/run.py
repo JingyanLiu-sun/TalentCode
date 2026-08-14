@@ -15,6 +15,7 @@ class StdoutPrinter:
     def __init__(self) -> None:
         self._inline = False  # True while LLM tokens are mid-line
         self._run_start: float = 0.0
+        self._last_cost: float | None = None  # 最近一次 cost.updated 的 run 累计费用
 
     # 若当前行有未换行的 token，补一个换行符
     def _ensure_newline(self) -> None:
@@ -56,10 +57,17 @@ class StdoutPrinter:
             self._ensure_newline()
             print(f"[step {event.get('step')}] done")
 
+        elif t == "cost.updated":
+            self._last_cost = float(event.get("cumulative_cost_usd") or 0.0)
+
         elif t == "run.finished":
             self._ensure_newline()
             elapsed = time.monotonic() - self._run_start
-            print(f"[run] {event.get('status', '')}  {event.get('steps')} steps  {elapsed:.1f}s")
+            cost_str = f"  ${self._last_cost:.4f}" if self._last_cost is not None else ""
+            print(
+                f"[run] {event.get('status', '')}  {event.get('steps')} steps"
+                f"  {elapsed:.1f}s{cost_str}"
+            )
 
 
 # 异步核心：连接 daemon，订阅事件，触发 run，等待 run.finished
@@ -90,7 +98,7 @@ async def _run_async(goal: str, config: KamaConfig) -> int:
         await client.send_command(
             "event.subscribe",
             {
-                "topics": ["run.*", "step.*", "tool.*", "llm.token", "llm.usage"],
+                "topics": ["run.*", "step.*", "tool.*", "llm.token", "llm.usage", "cost.updated"],
                 "scope": "global",
             },
         )

@@ -91,6 +91,17 @@ class LlmUsageEvent(BaseModel):
     ts: str
 
 
+class CostUpdatedEvent(BaseModel):
+    type: Literal["cost.updated"] = "cost.updated"
+    run_id: str
+    session_id: str = ""
+    call_cost_usd: float
+    cumulative_cost_usd: float
+    total_input_tokens: int
+    total_output_tokens: int
+    ts: str
+
+
 class LlmModelSelectedEvent(BaseModel):
     type: Literal["llm.model_selected"] = "llm.model_selected"
     run_id: str
@@ -119,6 +130,14 @@ class SessionMessageReceivedEvent(BaseModel):
     type: Literal["session.message_received"] = "session.message_received"
     session_id: str
     content: str
+    ts: str
+
+
+class SessionMessageQueuedEvent(BaseModel):
+    type: Literal["session.message_queued"] = "session.message_queued"
+    session_id: str
+    run_id: str  # 排队消息对应的 run_id，待当前 run 结束后自动执行
+    position: int  # 当前队列中的位置（1 起）
     ts: str
 
 
@@ -215,10 +234,12 @@ Event = Annotated[
     | ToolCallFailedEvent
     | LlmTokenEvent
     | LlmUsageEvent
+    | CostUpdatedEvent
     | LlmModelSelectedEvent
     | LogLineEvent
     | SessionCreatedEvent
     | SessionMessageReceivedEvent
+    | SessionMessageQueuedEvent
     | SessionWaitingForInputEvent
     | SessionResumedEvent
     | SessionClosedEvent

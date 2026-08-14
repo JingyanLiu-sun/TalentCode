@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from kama_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
 from kama_claude.core.compact.compactor import Compactor
@@ -13,6 +15,7 @@ from kama_claude.core.context import ExecutionContext
 from kama_claude.core.events.bus import EventBus, EventHandler
 from kama_claude.core.events.writer import EventWriter
 from kama_claude.core.llm.base import LLMProvider
+from kama_claude.core.llm.cost import CostTracker, TrackingProvider
 from kama_claude.core.llm.provider import AnthropicProvider
 from kama_claude.core.loop import AgentLoop
 from kama_claude.core.mcp.server import McpServerManager
@@ -180,24 +183,32 @@ class AgentRunner:
             project_context=project_ctx,
             system_prompt_override=system_prompt_override,
         )
-        prefill_len = len(history)
+        # prefill 已在 thread.jsonl 中，标记为已持久化；run 内新增消息在结束时追加
+        context.persisted_len = len(history)
 
         async with EventWriter(run_path / "events.jsonl") as writer:
             writer.subscribe(bus)
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 
             cancelled = False
+            # 在 try 外创建，确保异常路径下 flush 也能访问
+            cost_tracker = CostTracker(model=self._config.llm.default_model)
             try:
-                provider: LLMProvider = self._provider or AnthropicProvider(
+                base_provider: LLMProvider = self._provider or AnthropicProvider(
                     self._config.llm.default_model
                 )
                 if self._trace is not None:
-                    provider = TracingProvider(
-                        provider,
+                    base_provider = TracingProvider(
+                        base_provider,
                         self._trace,
                         include_payload=self._config.trace.include_llm_payload,
                     )
                 session_id_str = session.id if session is not None else ""
+                # 费用统计：包装 provider，每次调用后记账并发布 cost.updated 事件
+                provider = TrackingProvider(
+                    base_provider, cost_tracker, bus,
+                    run_id=run_id, session_id=session_id_str,
+                )
                 child_runs_dir = (
                     store.runs_dir(session.id)
                     if session is not None and store is not None
@@ -219,7 +230,20 @@ class AgentRunner:
                     if session is not None and store is not None
                     else run_path
                 )
-                compactor = Compactor(bus, session_dir, session_id_str)
+                # 自动 compact 前把未落盘的新消息刷入 thread.jsonl，保证记录完整
+                persist_pending: Callable[[list[dict[str, Any]]], None] | None
+                if session is not None and store is not None:
+                    _sid, _store, _rid = session.id, store, run_id
+
+                    def _flush(msgs: list[dict[str, Any]]) -> None:
+                        _store.append_messages(_sid, msgs, run_id=_rid)
+
+                    persist_pending = _flush
+                else:
+                    persist_pending = None
+                compactor = Compactor(
+                    bus, session_dir, session_id_str, persist_pending=persist_pending
+                )
                 loop = AgentLoop(
                     provider, registry, bus,
                     permission_manager=self._permission_manager,
@@ -239,6 +263,14 @@ class AgentRunner:
                 if not context.is_done():
                     context.mark_failed("llm_error")
 
+            # 费用明细落盘：session 模式写入 session 目录（跨 run 累积），否则写入 run 目录
+            cost_path = (
+                store.session_dir(session.id) / "cost.jsonl"
+                if session is not None and store is not None
+                else run_path / "cost.jsonl"
+            )
+            cost_tracker.flush(cost_path)
+
             await bus.publish(
                 RunFinishedEvent(
                     run_id=run_id,
@@ -250,7 +282,8 @@ class AgentRunner:
             )
 
         if session is not None and store is not None:
-            store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
+            new_messages = context.messages[context.persisted_len:]
+            store.append_messages(session.id, new_messages, run_id=run_id)
 
         if cancelled:
             raise asyncio.CancelledError()

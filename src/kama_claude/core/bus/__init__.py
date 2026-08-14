@@ -13,6 +13,7 @@ from kama_claude.core.bus.envelope import (
 )
 from kama_claude.core.bus.events import (
     CoreStartedEvent,
+    CostUpdatedEvent,
     Event,
     LlmModelSelectedEvent,
     LlmTokenEvent,
@@ -30,6 +31,7 @@ from kama_claude.core.bus.events import (
 __all__ = [
     "Command",
     "CoreStartedEvent",
+    "CostUpdatedEvent",
     "Event",
     "LogLineEvent",
     "LlmModelSelectedEvent",

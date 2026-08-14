@@ -157,7 +157,7 @@ def test_note_save_tool_block_shows_remembered() -> None:
     assert "remembered" in block._summary()  # type: ignore[attr-defined]
 
 
-# 功能：验证提交用户输入时会追加 user turn，并进入 busy 状态
+# 功能：验证提交用户输入时会追加 user turn，并进入 busy 状态（输入框保持可用以便排队新消息）
 # 设计：用 fake client 替代 SocketClient，直接调用 on_chat_text_area_submitted，
 #       覆盖 TextArea 清空内容 + 设置 busy 占位符的核心状态迁移
 async def test_input_submit_appends_user_turn_and_disables_prompt() -> None:
@@ -188,10 +188,45 @@ async def test_input_submit_appends_user_turn_and_disables_prompt() -> None:
     await app.on_chat_text_area_submitted(event)  # type: ignore[arg-type]
 
     assert app._busy  # type: ignore[attr-defined]
-    assert area.disabled
+    assert not area.disabled
     assert area.text == ""
     assert "agent is working" in area.border_title.lower()
     assert appended[0].content == "[bold]>[/bold] hello"
+
+
+# 功能：验证 agent 忙时提交新消息不再被拒绝，而是追加排队引导提示并交给 daemon 排队
+# 设计：预置 _busy=True 后再次提交，断言追加 user turn 与 queued 提示且保持 busy
+async def test_input_submit_while_busy_queues_message() -> None:
+    class _FakeArea:
+        def __init__(self) -> None:
+            self.disabled = False
+            self.border_title = ""
+            self.text = "follow up"
+
+    class _FakeEvent:
+        def __init__(self, area: _FakeArea) -> None:
+            self.value = area.text
+            self.text_area = area
+
+    class _FakeClient:
+        async def send_command(self, method: str, params: dict) -> dict:
+            return {"run_id": "run-2"}
+
+    app = KamaTuiApp("127.0.0.1", 9999)
+    appended: list[Widget] = []
+    app._append = lambda w: appended.append(w)  # type: ignore[method-assign]
+    app._update_header = lambda state: None  # type: ignore[method-assign]
+    app._client = _FakeClient()  # type: ignore[assignment]
+    app._session_id = "sess-1"
+    app._busy = True  # type: ignore[attr-defined]
+
+    area = _FakeArea()
+    await app.on_chat_text_area_submitted(_FakeEvent(area))  # type: ignore[arg-type]
+
+    assert app._busy  # type: ignore[attr-defined]
+    assert area.text == ""
+    assert appended[0].content == "[bold]>[/bold] follow up"
+    assert "queued" in appended[1].content  # type: ignore[attr-defined]
 
 
 # 功能：验证未知事件类型不抛异常也不追加任何 widget
