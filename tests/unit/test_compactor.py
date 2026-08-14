@@ -340,3 +340,41 @@ async def test_compact_preserves_tail_messages_intact(tmp_path: Path) -> None:
     await compactor.compact(ctx, provider)
 
     assert ctx.messages[2:] == expected_tail
+
+
+# 功能：验证 compact 前把未持久化的新消息通过 persist_pending 刷盘，并重置 persisted_len
+# 设计：模拟 prefill 2 条 + run 内新增 8 条，persisted_len=2；
+# 压缩后断言回调收到 8 条新消息且标记移到替换后列表末尾
+async def test_compact_flushes_pending_messages(tmp_path: Path) -> None:
+    provider = _stub_provider()
+    bus = EventBus()
+    flushed: list[dict[str, Any]] = []
+    compactor = Compactor(bus, tmp_path, "sess-1", persist_pending=flushed.extend)
+    ctx = ExecutionContext(run_id="r1", goal="test", max_steps=5)
+    messages = _make_messages(5)  # 10 条：2 条 prefill + 8 条 run 内新增
+    ctx.messages = list(messages)
+    ctx.persisted_len = 2
+
+    await compactor.compact(ctx, provider)
+
+    assert flushed == messages[2:]  # 未落盘的新消息全部刷盘，thread 记录完整
+    assert ctx.persisted_len == len(ctx.messages)  # 替换后整个列表视为已计入
+
+
+# 功能：验证压缩失败时 persist_pending 不被调用且 persisted_len 不变
+# 设计：stub provider 抛异常，断言刷盘回调未触发、标记保持原值
+async def test_compact_failure_does_not_flush(tmp_path: Path) -> None:
+    provider = MagicMock()
+    provider.chat = AsyncMock(side_effect=RuntimeError("LLM error"))
+    bus = EventBus()
+    flushed: list[dict[str, Any]] = []
+    compactor = Compactor(bus, tmp_path, "sess-1", persist_pending=flushed.extend)
+    ctx = ExecutionContext(run_id="r1", goal="test", max_steps=5)
+    ctx.messages = _make_messages(5)
+    ctx.persisted_len = 2
+
+    result = await compactor.compact(ctx, provider)
+
+    assert result is None
+    assert flushed == []
+    assert ctx.persisted_len == 2

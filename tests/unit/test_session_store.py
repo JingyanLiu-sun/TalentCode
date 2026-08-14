@@ -89,3 +89,41 @@ def test_notes_read_and_append(tmp_path: Path) -> None:
     notes = store.read_notes("sess-1")
     assert "Python 3.12" in notes
     assert "run-1" in notes
+
+
+# 功能：验证 write_compacted 覆写 thread.jsonl 并备份原文件
+# 设计：先写入原始消息，压缩覆写后断言新 thread 只含摘要对且存在一个 .bak 备份
+def test_write_compacted_replaces_and_backs_up(tmp_path: Path) -> None:
+    store = SessionStore(tmp_path)
+    store.append_message("sess-1", "user", "old history")
+
+    store.write_compacted("sess-1", [
+        {"role": "user", "content": "summary"},
+        {"role": "assistant", "content": "Understood"},
+    ])
+
+    assert store.read_messages("sess-1") == [
+        {"role": "user", "content": "summary"},
+        {"role": "assistant", "content": "Understood"},
+    ]
+    backups = list(store.session_dir("sess-1").glob("thread_*.jsonl.bak"))
+    assert len(backups) == 1
+    assert "old history" in backups[0].read_text(encoding="utf-8")
+
+
+# 功能：验证多次压缩时只保留最近一个 .bak，更早的备份被自动清理
+# 设计：连续三次 write_compacted（间隔写入保证时间戳文件名不同），断言最终只剩一个备份
+def test_write_compacted_prunes_old_backups(tmp_path: Path) -> None:
+    import time
+
+    store = SessionStore(tmp_path)
+    for i in range(3):
+        store.append_message("sess-1", "user", f"round {i}")
+        store.write_compacted("sess-1", [
+            {"role": "user", "content": f"summary {i}"},
+            {"role": "assistant", "content": "Understood"},
+        ])
+        time.sleep(1.1)  # 时间戳精度到秒，确保备份文件名互不相同
+
+    backups = list(store.session_dir("sess-1").glob("thread_*.jsonl.bak"))
+    assert len(backups) == 1
