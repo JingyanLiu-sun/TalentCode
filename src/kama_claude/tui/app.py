@@ -808,6 +808,7 @@ class KamaTuiApp(App[None]):
                         "tool.*",
                         "llm.token",
                         "llm.usage",
+                        "cost.*",
                         "log.*",
                         "permission.*",
                         "context.*",
@@ -1002,6 +1003,18 @@ class KamaTuiApp(App[None]):
                 f"out={event.get('output_tokens')} "
                 f"cache={event.get('cache_read_input_tokens')}[/dim]"
                 f"  {ctx_bar}",
+                classes="usage",
+            ))
+
+        elif t == "cost.updated":
+            run_id = event.get("run_id", "")
+            if run_id in self._subagent_run_ids:
+                return
+            call_cost = float(event.get("call_cost_usd") or 0.0)
+            cumulative = float(event.get("cumulative_cost_usd") or 0.0)
+            self._append(Static(
+                f"[dim]  cost  "
+                f"call=${call_cost:.4f}  run累计=${cumulative:.4f}[/dim]",
                 classes="usage",
             ))
 

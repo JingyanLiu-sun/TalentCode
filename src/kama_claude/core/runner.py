@@ -15,6 +15,7 @@ from kama_claude.core.context import ExecutionContext
 from kama_claude.core.events.bus import EventBus, EventHandler
 from kama_claude.core.events.writer import EventWriter
 from kama_claude.core.llm.base import LLMProvider
+from kama_claude.core.llm.cost import CostTracker, TrackingProvider
 from kama_claude.core.llm.provider import AnthropicProvider
 from kama_claude.core.loop import AgentLoop
 from kama_claude.core.mcp.server import McpServerManager
@@ -190,17 +191,24 @@ class AgentRunner:
             await bus.publish(RunStartedEvent(run_id=run_id, goal=goal, ts=_now()))
 
             cancelled = False
+            # 在 try 外创建，确保异常路径下 flush 也能访问
+            cost_tracker = CostTracker(model=self._config.llm.default_model)
             try:
-                provider: LLMProvider = self._provider or AnthropicProvider(
+                base_provider: LLMProvider = self._provider or AnthropicProvider(
                     self._config.llm.default_model
                 )
                 if self._trace is not None:
-                    provider = TracingProvider(
-                        provider,
+                    base_provider = TracingProvider(
+                        base_provider,
                         self._trace,
                         include_payload=self._config.trace.include_llm_payload,
                     )
                 session_id_str = session.id if session is not None else ""
+                # 费用统计：包装 provider，每次调用后记账并发布 cost.updated 事件
+                provider = TrackingProvider(
+                    base_provider, cost_tracker, bus,
+                    run_id=run_id, session_id=session_id_str,
+                )
                 child_runs_dir = (
                     store.runs_dir(session.id)
                     if session is not None and store is not None
@@ -254,6 +262,14 @@ class AgentRunner:
                 )
                 if not context.is_done():
                     context.mark_failed("llm_error")
+
+            # 费用明细落盘：session 模式写入 session 目录（跨 run 累积），否则写入 run 目录
+            cost_path = (
+                store.session_dir(session.id) / "cost.jsonl"
+                if session is not None and store is not None
+                else run_path / "cost.jsonl"
+            )
+            cost_tracker.flush(cost_path)
 
             await bus.publish(
                 RunFinishedEvent(

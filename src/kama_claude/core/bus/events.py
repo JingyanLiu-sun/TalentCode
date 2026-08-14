@@ -91,6 +91,17 @@ class LlmUsageEvent(BaseModel):
     ts: str
 
 
+class CostUpdatedEvent(BaseModel):
+    type: Literal["cost.updated"] = "cost.updated"
+    run_id: str
+    session_id: str = ""
+    call_cost_usd: float
+    cumulative_cost_usd: float
+    total_input_tokens: int
+    total_output_tokens: int
+    ts: str
+
+
 class LlmModelSelectedEvent(BaseModel):
     type: Literal["llm.model_selected"] = "llm.model_selected"
     run_id: str
@@ -223,6 +234,7 @@ Event = Annotated[
     | ToolCallFailedEvent
     | LlmTokenEvent
     | LlmUsageEvent
+    | CostUpdatedEvent
     | LlmModelSelectedEvent
     | LogLineEvent
     | SessionCreatedEvent

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from kama_claude.core.bus.events import ContextCompactedEvent
 from kama_claude.core.events.bus import EventBus
+from kama_claude.core.llm.tokens import count_messages_tokens
 
 if TYPE_CHECKING:
     from kama_claude.core.context import ExecutionContext
@@ -157,9 +158,8 @@ class Compactor:
         if not history:
             return None
 
-        original_estimate = sum(
-            len(str(m.get("content", ""))) for m in messages
-        ) // 4  # 粗略 token 估算（字符数 / 4）
+        # 用真实 tokenizer 估算压缩前 token 量（tiktoken 不可用时自动降级为字符数/4）
+        original_estimate = count_messages_tokens(messages)
 
         history_text = _messages_to_text(_preprocess_for_summary(history))
         prompt = _COMPACT_PROMPT

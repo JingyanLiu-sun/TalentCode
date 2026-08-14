@@ -16,6 +16,7 @@ dependencies = [
     "anthropic>=0.25",     # Anthropic LLM SDK（流式 + prompt caching）
     "textual>=0.75",       # 终端 UI 框架（kama-tui）
     "httpx[socks]>=0.28.1",
+    "tiktoken>=0.7",       # 真实 tokenizer 计数（离线估算，替代字符数/4）
 ]
 
 # 安装后可在 PATH 中执行的入口：`kama` / `kama-core` / `kama-tui`
