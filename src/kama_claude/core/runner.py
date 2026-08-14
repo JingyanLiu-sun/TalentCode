@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from kama_claude.core.bus.events import RunFinishedEvent, RunStartedEvent
 from kama_claude.core.compact.compactor import Compactor
@@ -180,7 +182,8 @@ class AgentRunner:
             project_context=project_ctx,
             system_prompt_override=system_prompt_override,
         )
-        prefill_len = len(history)
+        # prefill 已在 thread.jsonl 中，标记为已持久化；run 内新增消息在结束时追加
+        context.persisted_len = len(history)
 
         async with EventWriter(run_path / "events.jsonl") as writer:
             writer.subscribe(bus)
@@ -219,7 +222,20 @@ class AgentRunner:
                     if session is not None and store is not None
                     else run_path
                 )
-                compactor = Compactor(bus, session_dir, session_id_str)
+                # 自动 compact 前把未落盘的新消息刷入 thread.jsonl，保证记录完整
+                persist_pending: Callable[[list[dict[str, Any]]], None] | None
+                if session is not None and store is not None:
+                    _sid, _store, _rid = session.id, store, run_id
+
+                    def _flush(msgs: list[dict[str, Any]]) -> None:
+                        _store.append_messages(_sid, msgs, run_id=_rid)
+
+                    persist_pending = _flush
+                else:
+                    persist_pending = None
+                compactor = Compactor(
+                    bus, session_dir, session_id_str, persist_pending=persist_pending
+                )
                 loop = AgentLoop(
                     provider, registry, bus,
                     permission_manager=self._permission_manager,
@@ -250,7 +266,8 @@ class AgentRunner:
             )
 
         if session is not None and store is not None:
-            store.append_messages(session.id, context.messages[prefill_len:], run_id=run_id)
+            new_messages = context.messages[context.persisted_len:]
+            store.append_messages(session.id, new_messages, run_id=run_id)
 
         if cancelled:
             raise asyncio.CancelledError()

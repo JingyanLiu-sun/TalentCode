@@ -129,17 +129,29 @@ class SessionStore:
             return messages[:last_balanced]
         return messages
 
-    # 将压缩后的消息对覆盖写入 thread.jsonl，原文件备份为 thread_<ts>.jsonl.bak
+    # 将压缩后的消息对覆盖写入 thread.jsonl，原文件备份为 thread_<ts>.jsonl.bak；
+    # 只保留最近一个备份，更早的 .bak 自动清理
     def write_compacted(self, sid: str, messages: list[dict[str, Any]]) -> None:
-        path = self.session_dir(sid) / "thread.jsonl"
+        sdir = self.session_dir(sid)
+        path = sdir / "thread.jsonl"
         ts_str = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-        bak = self.session_dir(sid) / f"thread_{ts_str}.jsonl.bak"
+        bak = sdir / f"thread_{ts_str}.jsonl.bak"
         if path.exists():
             path.rename(bak)
+        self._prune_backups(sdir, keep=1)
         with path.open("w", encoding="utf-8") as f:
             for msg in messages:
                 row: dict[str, Any] = {"ts": _now(), "role": msg["role"], "content": msg["content"]}
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    # 清理 session 目录下的 thread 备份，按文件名时间戳倒序仅保留最近 keep 个
+    def _prune_backups(self, sdir: Path, keep: int = 1) -> None:
+        backups = sorted(sdir.glob("thread_*.jsonl.bak"), key=lambda p: p.name, reverse=True)
+        for old in backups[keep:]:
+            try:
+                old.unlink()
+            except OSError:
+                logger.warning("failed to remove old backup %s", old)
 
     # 读取 notes.md 全文，文件不存在时返回空字符串
     def read_notes(self, sid: str) -> str:

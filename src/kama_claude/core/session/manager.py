@@ -75,12 +75,16 @@ class SessionManager:
         await self._bus.publish(SessionCreatedEvent(session_id=sid, mode=mode, ts=ts))
         return session
 
+    # session 已关闭时抛 HandlerError；供入口检查与持锁后的二次检查复用
+    def _ensure_open(self, session: Session) -> None:
+        if session.status == "closed":
+            raise HandlerError(SESSION_CLOSED, "session already closed")
+
     # 处理用户消息，追加 thread 并启动一次 agent run；
     # session 忙时不再拒绝：消息立即持久化并入队，待当前 run 结束后自动依次执行
     async def send_message(self, sid: str, content: str, *, run_id: str | None = None) -> str:
         session = self._get_session(sid)
-        if session.status == "closed":
-            raise HandlerError(SESSION_CLOSED, "session already closed")
+        self._ensure_open(session)
         lock = self._locks[sid]
         run_id = run_id or new_run_id()
 
@@ -111,8 +115,7 @@ class SessionManager:
             return run_id
 
         async with lock:
-            if session.status == "closed":
-                raise HandlerError(SESSION_CLOSED, "session already closed")
+            self._ensure_open(session)
 
             if session.status == "waiting_for_input":
                 await self._bus.publish(SessionResumedEvent(session_id=sid, ts=_now()))

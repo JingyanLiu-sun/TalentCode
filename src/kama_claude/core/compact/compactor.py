@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,13 +81,23 @@ class CompactionResult:
 
 
 class Compactor:
-    # 初始化压缩器，绑定事件总线、session 目录和 session ID
-    def __init__(self, bus: EventBus, session_dir: Path, session_id: str) -> None:
+    # 初始化压缩器，绑定事件总线、session 目录和 session ID；
+    # 可选 persist_pending 回调：自动 compact 前先把尚未写入 thread.jsonl 的消息刷盘，
+    # 保证 thread 记录完整不因内存压缩丢消息
+    def __init__(
+        self,
+        bus: EventBus,
+        session_dir: Path,
+        session_id: str,
+        persist_pending: Callable[[list[dict[str, Any]]], None] | None = None,
+    ) -> None:
         self._bus = bus
         self._session_dir = session_dir
         self._session_id = session_id
+        self._persist_pending = persist_pending
 
-    # 压缩 ExecutionContext.messages，就地替换为 [摘要2条] + [最近N轮完整消息]
+    # 压缩 ExecutionContext.messages，就地替换为 [摘要2条] + [最近N轮完整消息]；
+    # 替换前先把未持久化的消息刷入 thread.jsonl，保证完整记录不丢
     async def compact(
         self,
         context: ExecutionContext,
@@ -97,12 +108,21 @@ class Compactor:
         if result is None:
             return None
 
+        # 刷盘：标记之后都是尚未写入 thread.jsonl 的新消息
+        if self._persist_pending is not None:
+            pending = context.messages[context.persisted_len:]
+            if pending:
+                self._persist_pending(pending)
+
         summary_part = [
             {"role": "user", "content": result.summary_text},
             {"role": "assistant", "content": "Understood, I'll continue from this summary."},
         ]
         tail_part = result.tail_messages or []
         context.messages = summary_part + tail_part
+        # 摘要对仅留在内存与 summary 文件，不进 thread；tail 已随刷盘/前序写入落盘，
+        # 因此替换后整个列表都视为已计入，标记移到末尾
+        context.persisted_len = len(context.messages)
         self._write_summary(result.summary_text)
         await self._bus.publish(
             ContextCompactedEvent(

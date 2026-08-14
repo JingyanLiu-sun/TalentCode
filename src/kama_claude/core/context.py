@@ -14,6 +14,9 @@ class ExecutionContext:
     global_context: str = ""
     project_context: str = ""
     messages: list[dict[str, Any]] = field(default_factory=list)
+    # messages 中已计入 thread.jsonl 的前缀长度；run 结束时只持久化该标记之后的新消息，
+    # 自动 compact 前会先刷新待持久化消息并重置该标记
+    persisted_len: int = 0
     step: int = 0
     status: str = "running"  # "running" | "success" | "failed"
     reason: str | None = None
