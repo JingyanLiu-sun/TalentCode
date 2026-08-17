@@ -169,6 +169,15 @@ async def test_send_message_while_busy_queues_and_runs_in_order(tmp_path: Path) 
     run2 = await asyncio.wait_for(queued_task, timeout=5.0)
 
     assert calls == ["first", "second"]
+    # 排队消息只在入队时落盘一次：drain 执行后 thread 中不出现重复用户消息/重复事件
+    final_user = [m["content"] for m in store.read_messages(session.id) if m["role"] == "user"]
+    assert final_user == ["first", "second"]
+    received = [
+        e
+        for e in events  # type: ignore[attr-defined]
+        if e.type == "session.message_received"
+    ]
+    assert [e.content for e in received] == ["first", "second"]
     loaded = store.read_meta(session.id)
     assert loaded.status == "waiting_for_input"
     assert loaded.run_ids == [run1, run2]

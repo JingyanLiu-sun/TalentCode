@@ -51,8 +51,10 @@ class SessionManager:
         self._provider = provider
         self._sessions: dict[str, Session] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        # 忙时排队待执行的消息：sid -> (content, run_id, 完成信号) 队列
-        self._queues: dict[str, asyncio.Queue[tuple[str, str, asyncio.Future[None]]]] = {}
+        # 忙时排队待执行的消息：sid -> (content, run_id, 完成信号, 已持久化标志) 队列
+        self._queues: dict[
+            str, asyncio.Queue[tuple[str, str, asyncio.Future[None], bool]]
+        ] = {}
         self._skill_loader = SkillLoader()
 
     # 创建新 session 并写入 meta.json
@@ -101,7 +103,8 @@ class SessionManager:
             done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
             # 调用方可能提前取消，避免该 future 的异常无人认领触发告警
             done.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
-            queue.put_nowait((content, run_id, done))
+            # 消息已在上方落盘，标志已持久化，drain 执行时不再重复写入/发布
+            queue.put_nowait((content, run_id, done, True))
             await self._bus.publish(
                 SessionMessageQueuedEvent(
                     session_id=sid,
@@ -133,13 +136,15 @@ class SessionManager:
         async with self._locks[sid]:
             queue = self._queues[sid]
             while not queue.empty():
-                content, run_id, done = queue.get_nowait()
+                content, run_id, done, persisted = queue.get_nowait()
                 try:
                     if session.status == "closed":
                         raise HandlerError(SESSION_CLOSED, "session already closed")
                     if session.status == "waiting_for_input":
                         await self._bus.publish(SessionResumedEvent(session_id=sid, ts=_now()))
-                    await self._execute_message(sid, session, content, run_id)
+                    await self._execute_message(
+                        sid, session, content, run_id, persist=not persisted
+                    )
                     await self._transition(sid, session)
                 except BaseException as exc:
                     if not done.done():
@@ -166,12 +171,16 @@ class SessionManager:
                 )
         self._store.write_meta(session)
 
-    # 执行单条消息对应的 agent run：追加 user 消息、解析 Skill 并调用 runner
-    async def _execute_message(self, sid: str, session: Session, content: str, run_id: str) -> None:
-        self._store.append_message(sid, "user", content)
-        await self._bus.publish(
-            SessionMessageReceivedEvent(session_id=sid, content=content, ts=_now())
-        )
+    # 执行单条消息对应的 agent run：追加 user 消息、解析 Skill 并调用 runner；
+    # persist=False 用于忙时已落盘的排队消息，避免 thread.jsonl 与事件重复写入
+    async def _execute_message(
+        self, sid: str, session: Session, content: str, run_id: str, *, persist: bool = True
+    ) -> None:
+        if persist:
+            self._store.append_message(sid, "user", content)
+            await self._bus.publish(
+                SessionMessageReceivedEvent(session_id=sid, content=content, ts=_now())
+            )
 
         if not session.title:
             session.title = content[:40]
