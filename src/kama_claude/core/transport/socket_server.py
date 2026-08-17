@@ -67,10 +67,17 @@ class SocketServer:
     # 启动 TCP 服务器；若端口已被占用则退出进程
     async def start(self) -> str:
         try:
-            _r, w = await asyncio.open_connection(self._host, self._port)
+            # 预检必须带超时：残留进程处于半死状态时 SYN 无响应，
+            # 无超时会按 tcp_syn_retries 空等约 2 分钟才开始监听
+            _r, w = await asyncio.wait_for(
+                asyncio.open_connection(self._host, self._port), timeout=1.0
+            )
             w.close()
             await w.wait_closed()
             raise SystemExit(f"core already running at {self._host}:{self._port}")
+        except TimeoutError:
+            # 连接超时视为端口不可达，直接尝试绑定
+            pass
         except (ConnectionRefusedError, OSError):
             pass
 

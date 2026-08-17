@@ -470,6 +470,8 @@ class KamaTuiApp(App[None]):
     TITLE = "KamaClaude"
     BINDINGS = [
         Binding("ctrl+q", "quit", "quit"),
+        # VS Code 等 IDE 终端可能拦截 ctrl+q，提供不冲突的备用退出键
+        Binding("ctrl+x", "quit", show=False),
     ]
     CSS = """
     Screen { background: $background; }
@@ -501,7 +503,7 @@ class KamaTuiApp(App[None]):
         "[bold cyan]██╔═██╗ ██╔══██║██║╚██╔╝██║██╔══██║██║     ██║     ██╔══██║██║   ██║██║  ██║██╔══╝  [/bold cyan]\n"  # noqa: E501
         "[bold cyan]██║  ██╗██║  ██║██║ ╚═╝ ██║██║  ██║╚██████╗███████╗██║  ██║╚██████╔╝██████╔╝███████╗[/bold cyan]\n"  # noqa: E501
         "[bold cyan]╚═╝  ╚═╝╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚══════╝[/bold cyan]\n"  # noqa: E501
-        "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+C 退出[/dim]"
+        "[dim]  输入消息开始对话  ·  键入 / 触发 skill  ·  Ctrl+Q 退出（IDE 终端内可用 Ctrl+X）[/dim]"  # noqa: E501
     )
 
     # 初始化连接参数和 TUI 内部状态
