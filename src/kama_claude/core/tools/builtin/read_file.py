@@ -57,12 +57,16 @@ class ReadFileTool(BaseTool):
         "required": ["path"],
     }
 
-    # 按 mode 分发：full 读全文，structure 提取 AST 结构，range 读取行范围；禁止 .. 路径遍历
+    # 按 mode 分发：full 读全文，structure 提取 AST 结构，range 读取行范围；
+    # 安全边界：禁止 .. 路径遍历与绝对路径（与 description 的相对路径契约一致）
     async def invoke(self, params: dict[str, object]) -> ToolResult:
         p = ReadFileParams.model_validate(params)
 
         if ".." in Path(p.path).parts:
             raise PermissionError(f"path traversal not allowed: {p.path}")
+
+        if Path(p.path).is_absolute():
+            raise PermissionError(f"absolute path is not allowed: {p.path}")
 
         path = Path(p.path)
         if p.mode == "structure":
