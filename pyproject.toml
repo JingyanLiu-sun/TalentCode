@@ -30,6 +30,9 @@ kama-tui = "kama_claude.tui.__main__:main"
 packages = ["src/kama_claude"] # 源码在 src/kama_claude
 
 # ---- 开发期依赖（PEP 735）----
+# 注意：τ-bench（scripts/run_taubench_eval.py 的 Tier3 评测）故意不进依赖组——
+# 它是 git 源，写入 uv.lock 会破坏 `uv sync --frozen` 与 CI。
+# 安装方式见 scripts/run_taubench_eval.py 头部指引（uv pip install）。
 [dependency-groups]
 dev = [
     "ruff>=0.4",            # 快速 linter + import 排序等

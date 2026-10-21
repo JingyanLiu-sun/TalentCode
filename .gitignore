@@ -16,3 +16,6 @@ build/
 .DS_Store
 *.log
 workspace/
+
+# 公开评测数据集：原始数据不入库（LoCoMo 研究许可），子集由 prepare_datasets.py 生成
+evaluation/public/data/

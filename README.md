@@ -1,4 +1,4 @@
-# KamaClaude
+# TalentClaude
 
 一个本地运行的 Claude Code 风格 AI 编程 Agent 运行时：daemon + 多客户端架构，
 ReAct 工具调用闭环、6 层权限审批、上下文水位治理与压缩、thread/notes 分层记忆、
@@ -12,8 +12,8 @@ Skills / Subagents / MCP 扩展。
 
 ```mermaid
 graph TD
-    CLI["kama CLI"] -->|JSON-RPC over NDJSON| CORE["kama-core daemon"]
-    TUI["kama-tui"] -->|JSON-RPC over NDJSON| CORE
+    CLI["Talent CLI"] -->|JSON-RPC over NDJSON| CORE["Talent-core daemon"]
+    TUI["Talent-tui"] -->|JSON-RPC over NDJSON| CORE
     CORE --> MGR["SessionManager"]
     MGR --> RUN["AgentRunner"]
     RUN --> LOOP["AgentLoop (ReAct)"]
@@ -64,13 +64,13 @@ cp .env.example .env
 # 编辑 .env，填入 ANTHROPIC_API_KEY 和模型名
 
 # 3. 启动 daemon（默认监听 127.0.0.1:7437）
-kama-core
+Talent-core
 
 # 4. 另开终端，命令行跑一个任务
-kama run "阅读本目录的代码结构并总结"
+Talent run "阅读本目录的代码结构并总结"
 
 # 或者使用 TUI
-kama-tui
+Talent-tui
 ```
 
 更多运行与排障说明见 [RUNBOOK.md](RUNBOOK.md)，IPC 协议细节见 [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md)。
@@ -78,9 +78,9 @@ kama-tui
 ## 项目结构
 
 ```
-src/kama_claude/
-├── cli/            # kama 命令行客户端
-├── tui/            # kama-tui（Textual 实现）
+src/Talent_claude/
+├── cli/            # Talent 命令行客户端
+├── tui/            # Talent-tui（Textual 实现）
 ├── core/
 │   ├── app.py      # daemon 入口
 │   ├── loop.py     # ReAct AgentLoop（含自动 compact 触发）
